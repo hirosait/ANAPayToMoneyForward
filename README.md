@@ -30,3 +30,34 @@ $ . env/bin/activate
 (env) $ ls *.json
 credentials.json	token.json
 ```
+
+## .envファイルの設定
+スクリプトがGoogle Sheetsとgmailアカウントにアクセスするために、以下のように.envファイルを作成します。
+```
+SHEET_ID=YOUR_SHEET_ID
+EMAIL=
+PASSWORD=
+```
+
+## スクリプトの実行
+環境設定が完了したら、以下のコマンドでスクリプトを実行します。
+
+```
+bash
+(env) $ python anapay2mf.py
+```
+以上で、ANA Payのメールから支払い情報を取り出し、マネーフォワードに自動登録することができます。
+
+## オリジナル
+このプロジェクトはhttps://github.com/takanory/anapay2moneyforwardを元にカスタマイズしたものです。
+
+## 変更点
+通常版Moneyforward MEに対応
+スクリーンショットを追加
+.env追加
+heliumからseleniumに一部書き換え
+
+## ライセンス
+このプロジェクトはオリジナルのリポジトリを基にしており、MITライセンスの下で公開されています。
+
+---
