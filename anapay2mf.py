@@ -10,9 +10,13 @@ import gspread
 import helium
 from dateutil import parser
 from dotenv import load_dotenv
+from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -38,11 +42,13 @@ SCOPES = [
 
 MF_URL = "https://ssnb.x.moneyforward.com/cf"
 
+TOKEN_JSON = "/app/token.json"
+CREDENTIALS_JSON = "/app/credentials.json"
+
 format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 logging.basicConfig(format=format, level=logging.INFO)
 
-load_dotenv()
-
+creds = None
 
 @dataclass
 class ANAPay:
@@ -100,9 +106,10 @@ def get_anapay_info(after: str) -> list[ANAPay]:
     """
     ana_pay_list = []
 
-    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    service = build("gmail", "v1", credentials=creds)
+    creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
 
+    # Gmail APIサービスオブジェクトの作成
+    service = build('gmail', 'v1', credentials=creds)
     # https://developers.google.com/gmail/api/reference/rest/v1/users.messages/list
     query = f"from:payinfo@121.ana.co.jp subject:ご利用のお知らせ after:{after}"
     results = service.users().messages().list(userId="me", q=query).execute()
@@ -115,12 +122,12 @@ def get_anapay_info(after: str) -> list[ANAPay]:
             ana_pay_list.append(ana_pay)
     return ana_pay_list
 
-    after = "2023/06/28"
+    after = "2024/03/20"
 
 
 def get_last_email_date(records: list[dict[str, str]]):
     """get last email date for gmail search"""
-    after = "2023/06/28"
+    after = "2024/03/20"
     if records:
         last_email_date = parser.parse(records[-1]["email_date"])
         after = f"{last_email_date:%Y/%m/%d}"
@@ -380,16 +387,6 @@ def add_mf_record(dt: datetime, amount: int, store: str, store_info: dict | None
         logging.info(f"支出金額を入力")
         save_screenshot(helium.get_driver(), "added_expense_amount_input.png")
 
-        # 資産を選択
-        # asset_dropdown = Select(driver.find_element(By.NAME, "user_asset_act[asset_id_hash]"))
-        # asset_dropdown.select_by_index(2)  # 適切なインデックスを選択
-        # logging.info(f"資産を選択")
-        # save_screenshot(driver, "selected_asset_type.png")
-        #
-        # # ポップアップの余白をクリックして閉じる
-        # popup_closer = driver.find_element(By.XPATH, "//*[@id='important']/label")
-        # popup_closer.click()
-
         if store_info:
             # カテゴリー選択
             l_category = driver.find_element(By.CSS_SELECTOR, "#js-large-category-selected")
@@ -462,27 +459,61 @@ def spreadsheet2mf(worksheet, store_dict: dict[str, dict[str, str]]) -> None:
     logging.info(f"Records added to moneyforward: {added}")
 
 
+def get_credentials():
+    """サービスアカウントの認証情報を返す"""
+    creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
+    return creds
+
+
 def main():
+
+    if os.path.exists(TOKEN_JSON):
+        creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
+
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                CREDENTIALS_JSON, SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open(TOKEN_JSON, 'w') as token:
+            token.write(creds.to_json())
+
+    # Gmail APIサービスオブジェクトの作成
+    service = build('gmail', 'v1', credentials=creds)
+
     try:
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
         service = build('gmail', 'v1', credentials=creds)
         results = service.users().labels().list(userId='me').execute()
     except RefreshError:
         # recreate token
-        Path("token.json").unlink(missing_ok=True)
+        Path(TOKEN_JSON).unlink(missing_ok=True)
         quickstart.main()
 
-    gc = gspread.oauth(
-        credentials_filename="credentials.json", authorized_user_filename="token.json"
-    )
-    sheet = gc.open_by_key(SHEET_ID)
-    anapay_sheet = sheet.worksheet("ANAPay")
-    store_sheet = sheet.worksheet("ANAPayStore")
-    store_dict = {store["store"]: store for store in store_sheet.get_all_records()}
+    try:
+        # Google Sheets APIへのアクセス
+        gc = gspread.oauth(
+            credentials_filename=CREDENTIALS_JSON, authorized_user_filename=TOKEN_JSON
+        )
 
-    gmail2spredsheet(anapay_sheet)
-    spreadsheet2mf(anapay_sheet, store_dict)
+        sheet = gc.open_by_key(SHEET_ID)
+        anapay_sheet = sheet.worksheet("ANAPay")
+        store_sheet = sheet.worksheet("ANAPayStore")
+        store_dict = {store["store"]: store for store in store_sheet.get_all_records()}
 
+        # データの処理
+        gmail2spredsheet(anapay_sheet)
+        spreadsheet2mf(anapay_sheet, store_dict)
 
+    except gspread.exceptions.SpreadsheetNotFound as e:
+        print(f'Spreadsheet not found: {e}')
+    except HttpError as error:
+        print(f'An error occurred with Google Sheets API: {error}')
+    except Exception as e:
+        print(f'An unexpected error occurred: {e}')
 if __name__ == "__main__":
     main()

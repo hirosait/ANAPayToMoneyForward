@@ -6,6 +6,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # 必要なパッケージをインストール
+
+# 必要なパッケージをインストール
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     gcc \
@@ -42,8 +44,12 @@ RUN mkdir -p /app/screenshots
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# スクリプトと設定ファイルをコピー
-COPY . .
+COPY requirements.txt /app/requirements.txt
+COPY anapay2mf.py /app/anapay2mf.py
+COPY quickstart.py /app/quickstart.py
+COPY credentials.json /app/credentials.json
+COPY token.json /app/token.json
+COPY .env /app/.env
 
 # 環境変数の読み込み
 RUN pip install python-dotenv
