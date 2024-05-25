@@ -1,6 +1,7 @@
 import base64
 import logging
 import os
+from os.path import join, dirname
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +30,8 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import quickstart
 
 # .env ファイルをロード
-load_dotenv()
+dotenv_path = join(dirname(__file__), '.env')
+load_dotenv(verbose=True, dotenv_path=dotenv_path)
 
 # 環境変数から SHEET_ID を取得
 SHEET_ID = os.getenv("SHEET_ID")
