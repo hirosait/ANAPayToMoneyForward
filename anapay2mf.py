@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import time
+from typing import Optional
+
 
 import gspread
 import helium
@@ -23,6 +25,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
@@ -74,7 +77,7 @@ class ANAPay:
         return f"{self.date_of_use:%Y-%m-%d %H:%M:%S}"
 
 
-def get_mail_info(res: dict) -> ANAPay | None:
+def get_mail_info(res: dict) -> Optional[ANAPay]:
     """
     1件のメールからANA Payの利用情報を取得して返す
     """
@@ -388,6 +391,14 @@ def add_mf_record(dt: datetime, amount: int, store: str, store_info: dict | None
         helium.write(amount, into="支出金額")
         logging.info(f"支出金額を入力")
         save_screenshot(helium.get_driver(), "added_expense_amount_input.png")
+
+        # ANA Payの選択
+        payment_select = driver.find_element(By.NAME, "user_asset_act_sub_account_id_hash")
+        select = Select(payment_select)
+        for option in select.options:
+            if option.text.startswith("ANA Pay"):
+                select.select_by_visible_text(option.text)
+                break
 
         if store_info:
             # カテゴリー選択
