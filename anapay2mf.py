@@ -1,68 +1,61 @@
-import base64
-import logging
 import os
-from os.path import join, dirname
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
 import time
-from typing import Optional
+import logging
+import traceback
+from datetime import datetime, timedelta
+from typing import List, Optional
 
+import imaplib
+import email
+from email.header import decode_header
 
 import gspread
-import helium
-from dateutil import parser
-from dotenv import load_dotenv
-from google.auth.transport.requests import Request
-from google.auth.exceptions import RefreshError
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
 from googleapiclient.errors import HttpError
 
+from dateutil import parser
+from dotenv import load_dotenv
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import Select
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import Select, WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+import helium
 
-import quickstart
+from dataclasses import dataclass
 
-# .env ファイルをロード
-dotenv_path = join(dirname(__file__), '.env')
-load_dotenv(verbose=True, dotenv_path=dotenv_path)
 
-# 環境変数から SHEET_ID を取得
+# 環境変数を読み込む
+load_dotenv()
+
+# 環境変数から情報を取得
 SHEET_ID = os.getenv("SHEET_ID")
-SHEET_NAME = "ANAPay"
+EMAIL = os.getenv("EMAIL") # gmail
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD") # gmail
+EMAIL_MF = os.getenv("EMAILMF") # Moneyforward
+PASSWORD = os.getenv("PASSWORD")
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+MAILBOX = os.getenv("GMAIL_MAILBOXNAME")
 
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/spreadsheets",
-]
+# 必須環境変数のチェック
+required_env_vars = ['SHEET_ID', 'EMAIL', 'EMAIL_PASSWORD', 'GOOGLE_APPLICATION_CREDENTIALS']
+missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+if missing_vars:
+    raise EnvironmentError(f"Required environment variables are missing: {', '.join(missing_vars)}")
 
-MF_URL = "https://ssnb.x.moneyforward.com/cf"
-
-TOKEN_JSON = "/app/token.json"
-CREDENTIALS_JSON = "/app/credentials.json"
-
-format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-logging.basicConfig(format=format, level=logging.INFO)
-
-creds = None
 
 @dataclass
 class ANAPay:
     """ANA Pay information"""
-
     email_date: datetime = None
     date_of_use: datetime = None
     amount: int = 0
     store: str = ""
+    email_id: str = ""
 
     def values(self) -> tuple[str, str, str, str]:
         """return tuple of values for spreadsheet"""
@@ -77,22 +70,18 @@ class ANAPay:
         return f"{self.date_of_use:%Y-%m-%d %H:%M:%S}"
 
 
-def get_mail_info(res: dict) -> Optional[ANAPay]:
+def get_mail_info(msg, email_id) -> Optional[ANAPay]:
     """
     1件のメールからANA Payの利用情報を取得して返す
     """
-    ana_pay = ANAPay()
-    for header in res["payload"]["headers"]:
+    ana_pay = ANAPay(email_id=email_id)
+    for header in msg["headers"]:
         if header["name"] == "Date":
             date_str = header["value"].replace(" +0900 (JST)", "")
             ana_pay.email_date = parser.parse(date_str)
 
     # 本文から日時、金額、店舗を取り出す
-    # ご利用日時：2023-06-28 22:46:19
-    # ご利用金額：44,308円
-    # ご利用店舗：SMOKEBEERFACTORY OTSUKATE
-    data = res["payload"]["body"]["data"]
-    body = base64.urlsafe_b64decode(data).decode()
+    body = msg["body"]
     for line in body.splitlines():
         if line.startswith("ご利用"):
             key, value = line.split("：")
@@ -105,42 +94,97 @@ def get_mail_info(res: dict) -> Optional[ANAPay]:
     return ana_pay
 
 
-def get_anapay_info(after: str) -> list[ANAPay]:
+def get_anapay_info(imap_server, username, password, after: str) -> List[ANAPay]:
     """
-    gmailからANA Payの利用履歴を取得する
+    IMAPを使用してGmailからANA Payの利用履歴を取得する
     """
     ana_pay_list = []
+    mail = imaplib.IMAP4_SSL(imap_server)
 
-    creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
+    try:
+        mail.login(username, password)
+        mail.select(MAILBOX)
 
-    # Gmail APIサービスオブジェクトの作成
-    service = build('gmail', 'v1', credentials=creds)
-    # https://developers.google.com/gmail/api/reference/rest/v1/users.messages/list
-    query = f"from:payinfo@121.ana.co.jp subject:ご利用のお知らせ after:{after}"
-    results = service.users().messages().list(userId="me", q=query).execute()
-    messages = results.get("messages", [])
-    for message in reversed(messages):
-        # https://developers.google.com/gmail/api/reference/rest/v1/users.messages/get
-        res = service.users().messages().get(userId="me", id=message["id"]).execute()
-        ana_pay = get_mail_info(res)
-        if ana_pay:
-            ana_pay_list.append(ana_pay)
+    except Exception as e:
+        logging.error(f"IMAP login/select exception: {e}")
+        return ana_pay_list
+
+    # 日付をIMAPの検索形式に変換
+    since_date = datetime.strptime(after, "%d-%b-%Y")
+    since_str = since_date.strftime("%d-%b-%Y")
+
+    # 検索条件を設定（件名に「[ANA Pay]」を含む）
+    query = f'(FROM "payinfo@121.ana.co.jp" SUBJECT "[ANA Pay]" SINCE {since_str})'
+    logging.info(f"IMAP search query: {query}")
+
+    try:
+        result, data = mail.search(None,query)
+        logging.info(f"IMAP search result: {result}, data: {data}")
+    except Exception as e:
+        logging.error(f"IMAP search exception: {e}")
+        return ana_pay_list
+
+    if result != 'OK':
+        logging.error(f"IMAP search failed with result: {result}, data: {data}")
+        return ana_pay_list
+
+    email_ids = data[0].split()
+
+    for email_id in reversed(email_ids):
+        result, msg_data = mail.fetch(email_id, "(RFC822)")
+        msg = email.message_from_bytes(msg_data[0][1])
+
+        # 件名をデコードして確認
+        subject, encoding = decode_header(msg['Subject'])[0]
+        if isinstance(subject, bytes):
+            subject = subject.decode(encoding if encoding else 'utf-8')
+        if "［ANA Pay］ご利用のお知らせ" not in subject:
+            continue
+
+        # 本文をデコードして「ご利用日時」を含むか確認
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    body = part.get_payload(decode=True).decode(part.get_content_charset())
+                    if "ご利用日時" in body:
+                        email_data = {
+                            "headers": [{"name": k, "value": v} for k, v in msg.items()],
+                            "body": body,
+                        }
+                        ana_pay = get_mail_info(email_data, email_id)
+                        if ana_pay:
+                            ana_pay_list.append(ana_pay)
+                        break
+        else:
+            body = msg.get_payload(decode=True).decode(msg.get_content_charset())
+            if "ご利用日時" in body:
+                email_data = {
+                    "headers": [{"name": k, "value": v} for k, v in msg.items()],
+                    "body": body,
+                }
+                ana_pay = get_mail_info(email_data, email_id)
+                if ana_pay:
+                    ana_pay_list.append(ana_pay)
+
+    mail.close()
+    mail.logout()
     return ana_pay_list
 
-    after = "2024/03/20"
+
+
 
 
 def get_last_email_date(records: list[dict[str, str]]):
     """get last email date for gmail search"""
-    after = "2024/03/20"
+    after = "20-Mar-2024"
     if records:
         last_email_date = parser.parse(records[-1]["email_date"])
-        after = f"{last_email_date:%Y/%m/%d}"
+        after = f"{last_email_date.strftime('%d-%b-%Y')}"
     return after
 
 
 def gmail2spredsheet(worksheet):
-    """gmailからANA Payの利用履歴を取得しスプレッドシートに書き込む"""
+    """IMAPからANA Payの利用履歴を取得しスプレッドシートに書き込む"""
     # get all records from spreadsheet
     records = worksheet.get_all_records()
     logging.info("Records in spreadsheet: %d", len(records))
@@ -150,8 +194,8 @@ def gmail2spredsheet(worksheet):
     logging.info("Last day on spreadsheet: %s", after)
     email_date_set = set(parser.parse(r["email_date"]) for r in records)
 
-    # get ANA Pay email from Gamil
-    ana_pay_list = get_anapay_info(after)
+    # get ANA Pay email from IMAP
+    ana_pay_list = get_anapay_info("imap.gmail.com", EMAIL, EMAIL_PASSWORD, after)
     logging.info("ANA Pay emails: %d", len(ana_pay_list))
 
     # add ANA Pay record to spreadsheet
@@ -159,11 +203,41 @@ def gmail2spredsheet(worksheet):
     for ana_pay in ana_pay_list:
         # メールの日付が存在しない場合はレコードを追加
         if ana_pay.email_date not in email_date_set:
-            worksheet.append_row(ana_pay.values(), value_input_option="USER_ENTERED")
-            count += 1
-            logging.info("Record added to spreadsheet: %s", ana_pay.values())
-            time.sleep(1)
+            try:
+                worksheet.append_row(ana_pay.values(), value_input_option="USER_ENTERED")
+                count += 1
+                logging.info("Record added to spreadsheet: %s", ana_pay.values())
+                time.sleep(1)
+            except Exception as e:
+                logging.error(f"Error adding record to spreadsheet: {e}")
     logging.info("Records added to spreadsheet: %d", count)
+
+    # 既読にするメールのIDをリストアップ
+    email_ids_to_mark_read = [ana_pay.email_id for ana_pay in ana_pay_list if ana_pay.email_date not in email_date_set]
+
+    # メールを既読にする
+    for email_id in email_ids_to_mark_read:
+        try:
+            mark_as_read("imap.gmail.com", EMAIL, EMAIL_PASSWORD, email_id)
+            logging.info("Email marked as read: %s", email_id)
+        except Exception as e:
+            logging.error(f"Error marking email as read: {e}")
+
+
+def mark_as_read(imap_server, username, password, email_id):
+    """
+    指定したメールを既読にする
+    """
+    mail = imaplib.IMAP4_SSL(imap_server)
+    try:
+        mail.login(username, password)
+        mail.select("inbox")
+        mail.store(email_id, '+FLAGS', '\\Seen')
+    except Exception as e:
+        logging.error(f"IMAP mark as read exception: {e}")
+    finally:
+        mail.close()
+        mail.logout()
 
 
 def save_screenshot(driver, filename):
@@ -176,15 +250,13 @@ def save_screenshot(driver, filename):
 def login_mf():
     """login moneyforward sbi"""
 
-    email = os.getenv("EMAIL")
-    password = os.getenv("PASSWORD")
 
-    if not email or not password:
-        logging.error("EMAILまたはPASSWORDが設定されていません。")
+    if not EMAIL_MF or not PASSWORD:
+        logging.error("MoneyforwadのログインEMAILまたはPASSWORDが設定されていません。")
         return
 
-    logging.info(f"使用するEMAIL: {email}")
-    logging.info(f"使用するPASSWORD: {'*' * len(password)}")
+    logging.info(f"使用するEMAIL: {EMAIL_MF}")
+    logging.info(f"使用するPASSWORD: {'*' * len(PASSWORD)}")
 
     # SeleniumでChromiumを使用する設定
     options = Options()
@@ -197,7 +269,8 @@ def login_mf():
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--headless")
-    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
     options.add_argument("--lang=ja-JP")
     service = ChromeService(executable_path='/usr/bin/chromedriver')
 
@@ -212,8 +285,8 @@ def login_mf():
         email_input = WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.NAME, "mfid_user[email]"))
         )
-        email_input.send_keys(email)
-        logging.info(f"メールアドレスを入力: {email}")
+        email_input.send_keys(EMAIL_MF)
+        logging.info(f"メールアドレスを入力: {EMAIL_MF}")
         login_button = driver.find_element(By.ID, "submitto")
         login_button.click()
 
@@ -232,7 +305,7 @@ def login_mf():
         logging.info("パスワード入力中")
         # パスワードを入力してログインボタンをクリック
         password_input = driver.find_element(By.NAME, "mfid_user[password]")
-        password_input.send_keys(password)
+        password_input.send_keys(PASSWORD)
         logging.info("パスワードを入力")
         login_button = driver.find_element(By.ID, "submitto")
         login_button.click()
@@ -257,7 +330,7 @@ def login_mf():
             password_input = WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.NAME, "mfid_user[password]"))
             )
-            password_input.send_keys(password)
+            password_input.send_keys(PASSWORD)
             logging.info("パスワードを再入力")
             login_button = driver.find_element(By.ID, "submitto")
             login_button.click()
@@ -278,7 +351,7 @@ def login_mf():
                             EC.presence_of_element_located((By.NAME, "mfid_user[password]"))
                         )
                         password_input = driver.find_element(By.NAME, "mfid_user[password]")
-                        password_input.send_keys(password)
+                        password_input.send_keys(PASSWORD)
                         logging.info("パスワードを再入力")
                         login_button = driver.find_element(By.ID, "submitto")
                         login_button.click()
@@ -315,13 +388,14 @@ def login_mf():
                 if account_selection and account_selection.text == "アカウントを選択する":
                     logging.info("アカウント選択画面が表示されました")
                     save_screenshot(driver, "account_selection.png")
-                    account_button = driver.find_element(By.XPATH, "/html/body/main/div/div/div[2]/div/section/div/div/form/button")
+                    account_button = driver.find_element(By.XPATH,
+                                                         "/html/body/main/div/div/div[2]/div/section/div/div/form/button")
                     account_button.click()
                     WebDriverWait(driver, 30).until(
                         EC.presence_of_element_located((By.NAME, "mfid_user[password]"))
                     )
                     password_input = driver.find_element(By.NAME, "mfid_user[password]")
-                    password_input.send_keys(password)
+                    password_input.send_keys(PASSWORD)
                     logging.info("パスワードを再入力")
                     login_button = driver.find_element(By.ID, "submitto")
                     login_button.click()
@@ -363,7 +437,7 @@ def login_mf():
     helium.set_driver(driver)
 
 
-def add_mf_record(dt: datetime, amount: int, store: str, store_info: dict | None):
+def add_mf_record(dt: datetime, amount: int, store: str, store_info: Optional[dict]):
     """
     add record to moneyfoward
     """
@@ -393,7 +467,7 @@ def add_mf_record(dt: datetime, amount: int, store: str, store_info: dict | None
         save_screenshot(helium.get_driver(), "added_expense_amount_input.png")
 
         # ANA Payの選択
-        payment_select = driver.find_element(By.NAME, "user_asset_act_sub_account_id_hash")
+        payment_select = driver.find_element(By.ID, "user_asset_act_sub_account_id_hash")
         select = Select(payment_select)
         for option in select.options:
             if option.text.startswith("ANA Pay"):
@@ -406,13 +480,15 @@ def add_mf_record(dt: datetime, amount: int, store: str, store_info: dict | None
             l_category.click()
             save_screenshot(driver, "cliked_large_category.png")
 
-            l_category_option = driver.find_element(By.XPATH, f"//a[@class='l_c_name' and text()='{store_info['大項目']}']")
+            l_category_option = driver.find_element(By.XPATH,
+                                                    f"//a[@class='l_c_name' and text()='{store_info['大項目']}']")
             l_category_option.click()
             save_screenshot(driver, "selected_large_category.png")
 
             m_category = driver.find_element(By.CSS_SELECTOR, "#js-middle-category-selected")
             m_category.click()
-            m_category_option = driver.find_element(By.XPATH, f"//a[@class='m_c_name' and text()='{store_info['中項目']}']")
+            m_category_option = driver.find_element(By.XPATH,
+                                                    f"//a[@class='m_c_name' and text()='{store_info['中項目']}']")
             m_category_option.click()
 
             # 店名を入力
@@ -437,6 +513,7 @@ def add_mf_record(dt: datetime, amount: int, store: str, store_info: dict | None
         logging.error(f"Error adding record to moneyforward: {e}")
         save_screenshot(helium.get_driver(), "add_record_error.png")
         return False
+
 
 def spreadsheet2mf(worksheet, store_dict: dict[str, dict[str, str]]) -> None:
     """スプレッドシートからmoneyfowardに書き込む"""
@@ -472,46 +549,14 @@ def spreadsheet2mf(worksheet, store_dict: dict[str, dict[str, str]]) -> None:
     logging.info(f"Records added to moneyforward: {added}")
 
 
-def get_credentials():
-    """サービスアカウントの認証情報を返す"""
-    creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
-    return creds
-
-
 def main():
-
-    if os.path.exists(TOKEN_JSON):
-        creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
-
-    # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CREDENTIALS_JSON, SCOPES)
-            creds = flow.run_local_server(port=0)
-        # Save the credentials for the next run
-        with open(TOKEN_JSON, 'w') as token:
-            token.write(creds.to_json())
-
-    # Gmail APIサービスオブジェクトの作成
-    service = build('gmail', 'v1', credentials=creds)
-
     try:
-        creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
-        service = build('gmail', 'v1', credentials=creds)
-        results = service.users().labels().list(userId='me').execute()
-    except RefreshError:
-        # recreate token
-        Path(TOKEN_JSON).unlink(missing_ok=True)
-        quickstart.main()
+        # ログ設定
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-    try:
-        # Google Sheets APIへのアクセス
-        gc = gspread.oauth(
-            credentials_filename=CREDENTIALS_JSON, authorized_user_filename=TOKEN_JSON
-        )
+        # gspread クライアントの初期化
+        creds = Credentials.from_service_account_file(GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES)
+        gc = gspread.authorize(creds)
 
         sheet = gc.open_by_key(SHEET_ID)
         anapay_sheet = sheet.worksheet("ANAPay")
@@ -523,10 +568,13 @@ def main():
         spreadsheet2mf(anapay_sheet, store_dict)
 
     except gspread.exceptions.SpreadsheetNotFound as e:
-        print(f'Spreadsheet not found: {e}')
+        logging.error(f'Spreadsheet not found: {e}')
     except HttpError as error:
-        print(f'An error occurred with Google Sheets API: {error}')
+        logging.error(f'An error occurred with Google Sheets API: {error}')
     except Exception as e:
-        print(f'An unexpected error occurred: {e}')
+        logging.error(f'An unexpected error occurred: {e}')
+        traceback.print_exc()  # 詳細なスタックトレースを表示する
+
+
 if __name__ == "__main__":
     main()
