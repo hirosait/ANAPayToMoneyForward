@@ -4,72 +4,88 @@
 
 ## 環境構築
 
-## Moneyforwadで「未対応の電子マネー・プリペイド」から"ANA Pay"を追加しておく
+### GmailでIMAPを有効に
+ 
+1. **Gmailにログイン**
+   - 設定からIMAPを有効にしてください。
 
-## GmailとGoogle SpreadsheetのAPIを使えるようにする
+### Moneyforwadで「未対応の電子マネー・プリペイド」から"ANA Pay"を追加
 
-* 以下のページも参考にして、GoogleのAPIを使えるようにする
-  * [Python クイックスタート  |  Gmail  |  Google for Developers](https://developers.google.com/gmail/api/quickstart/python?hl=ja)
-* Google Cloudコンソールでプロジェクトを作成する
-  * プロジェクトでGmail APIとGoogle Sheets APIを有効にする
-  * OAuth 同意画面でアプリを作成する
-  * テストユーザーで自分のGoogleアカウントを追加
-  * 認証情報をダウンロードし、`credentials.json` として保存
-* 以下のように `quickstart.py` を実行する
-  * 自分のGoogleアカウントで **同意する**
-  * 処理が成功すると `token.json` が生成される
-* quickstart.pyでRefresherrorになる場合
-  * 再度実行してもエラーになる場合は、token.jsonを削除して、gcloudコンソールのAPIとサービス→認証情報を作成して再度実行すれば良い
+1. **マネーフォワード MEにログイン**
+   - 未対応の電子マネー・プリペイドの設定画面に移動し、"ANA Pay"を追加してください。
+   
+### Google SpreadsheetのAPIを使用する準備
 
-```
-(env) $ python quickstart.py
-(env) $ ls *.json
-credentials.json	token.json
-```
+1. **Google Cloudコンソールでプロジェクトを作成**
+   - Google Cloudコンソールにアクセスし、新しいプロジェクトを作成します。
 
+2. **Google Drive APIとGoogle Sheets APIを有効にする**
+   - プロジェクトでGoogle Drive APIとGoogle Sheets APIを有効にします。
 
-## .envファイルの設定
-スクリプトがgmail, Google Sheetsm, MoneyForward MEアカウントにアクセスするために、以下のように.envファイルを作成します。
+3. **サービスアカウントを作成**
+   - プロジェクト内でサービスアカウントを作成し、必要な権限を付与します。
+   - サービスアカウントの認証情報をJSON形式でダウンロードし、プロジェクトのルートディレクトリに`service-account.json`という名前で保存します。
 
-```
+### .envファイルの設定
+
+スクリプトがGmail、Google Sheets、およびマネーフォワード MEアカウントにアクセスできるように、以下のように`.env`ファイルを作成します。
+
+\`\`\`
 SHEET_ID=YOUR_SHEET_ID
-EMAIL=<MoneyForwardのID>
-PASSWORD=<MoneyForwardのPass>k
-```
+EMAIL=YOUR_MONEYFORWARD_EMAIL
+PASSWORD=YOUR_MONEYFORWARD_PASSWORD
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/service-account.json
+\`\`\`
 
-## スクリプトの実行
-環境設定が完了したら、以下のコマンドでスクリプトを実行します。
+- `SHEET_ID`: Google SpreadsheetのシートIDを設定します。
+- `EMAIL`: マネーフォワード MEのログインID（メールアドレス）を設定します。
+- `PASSWORD`: マネーフォワード MEのログインパスワードを設定します。
+- `GOOGLE_APPLICATION_CREDENTIALS`: サービスアカウントの認証情報ファイルのパスを指定します。
 
-* Dockerイメージをビルドして実行する
+### スクリプトの実行
 
-```
+環境設定が完了したら、以下の手順でスクリプトを実行します。
+
+#### Dockerイメージのビルド
+
+\`\`\`bash
 cd /path/to/ANAPayToMoneyForward
 docker build -t anapay2moneyforward .
-```
+\`\`\`
 
-* Dockerコンテナの実行
-  * 環境変数や認証情報を含むディレクトリをマウントして、Dockerコンテナを実行します。
+#### Dockerコンテナの実行
 
-```
+環境変数や認証情報を含むディレクトリをマウントして、Dockerコンテナを実行します。
+
+\`\`\`bash
 docker run -d \
     -v /path/to/local/screenshots:/app/screenshots \
+    --env-file /path/to/your/.env \
     --name anapay2moneyforward \
     anapay2moneyforward
+\`\`\`
 
+#### Dockerコンテナの開始
+
+コンテナを実行するには、以下のコマンドを使用します。
+
+\`\`\`bash
 docker start anapay2moneyforward
-```
+\`\`\`
 
-以上で、ANA Payのメールから支払い情報を取り出し、マネーフォワードに自動登録することができます。
+これで、ANA Payのメールから支払い情報を抽出し、マネーフォワードに自動登録するプロセスが開始されます。
 
 ## オリジナル
 このプロジェクトはhttps://github.com/takanory/anapay2moneyforwardを元にカスタマイズしたものです。
 
 ## 変更点
-通常版Moneyforward MEに対応  
-スクリーンショットを追加  
-.env追加  
-heliumからseleniumに一部書き換え（途中）
-支払元で”ANA Pay"を選択するように追加
+- **通常版Moneyforward MEに対応**
+- **スクリーンショットの保存機能を追加**
+- **.envファイルのサポートを追加**
+- **一部処理をHeliumからSeleniumに置き換え**
+- **支払元で"ANA Pay"を選択する処理を追加**
+- **無料版Gmailでも使いやすいようにGmail APIからIMAPに変更**
+
 
 ## ライセンス
 このプロジェクトはオリジナルのリポジトリを基にしており、MITライセンスの下で公開されています。
