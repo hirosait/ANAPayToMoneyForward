@@ -1,23 +1,12 @@
-# Dockerfile
-# ベースイメージとしてPythonを使用
-FROM python:3.11-slim
+FROM arm64v8/python:3.11-slim
 
-# 作業ディレクトリを設定
-WORKDIR /app
-
-# 必要なパッケージをインストール
-
-# 必要なパッケージをインストール
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    gcc \
-    libc-dev \
-    libffi-dev \
-    libssl-dev \
-    wget \
-    unzip \
+# 必要なパッケージのインストール
+RUN apt-get update && apt-get install -y \
+    chromium \
+    chromium-driver \
+    xvfb \
+    xauth \
     fonts-liberation \
-    fonts-ipafont-gothic \
     libappindicator3-1 \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -29,13 +18,19 @@ RUN apt-get update && \
     libgtk-3-0 \
     libnspr4 \
     libnss3 \
-    libxss1 \
-    libxtst6 \
-    lsb-release \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
     xdg-utils \
-    chromium \
-    chromium-driver \
-    dbus-x11
+    --no-install-recommends
+
+# pipでseleniumとHeliumをインストール
+RUN pip install selenium helium
+
+# 環境変数の設定
+ENV DISPLAY=:99
+
+WORKDIR /app
 
 # スクリーンショットを保存するディレクトリを作成
 RUN mkdir -p /app/screenshots
@@ -47,15 +42,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY requirements.txt /app/requirements.txt
 COPY anapay2mf.py /app/anapay2mf.py
 COPY quickstart.py /app/quickstart.py
-COPY credentials.json /app/credentials.json
-COPY token.json /app/token.json
+COPY service-account.json /app/service-account.json
 COPY .env /app/.env
 
 # 環境変数の読み込み
 RUN pip install python-dotenv
 
-# Heliumが必要とする追加ライブラリをインストール
-RUN pip install selenium helium
-
-# エントリーポイントとしてスクリプトを指定
-CMD ["python", "anapay2mf.py"]
+# エントリーポイントの設定
+ENTRYPOINT ["python", "/app/anapay2mf.py"]
